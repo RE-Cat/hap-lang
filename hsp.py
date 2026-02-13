@@ -1,449 +1,516 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-HSP 语言解释器 - 最终稳定版
-修复变量引用、条件判断、循环记录
+HPS (HermesProbability Science) 解释器 v0.2.2
+修复: 变量替换、输出格式、特殊命令
+
+作者: RE-Cat
+GitHub: https://github.com/RE-Cat/HSP-Hermesian-probability-
 """
 
 import re
 import random
-import math
-import time
+import cmd
+import sys
+import argparse
+from typing import Any, Dict, List
+from dataclasses import dataclass
 
 
-class HSP:
+@dataclass
+class Pool:
+    """概率池"""
+    name: str
+    total_prob: float
+    items: List[str]
+
+    @property
+    def prob_per_item(self) -> float:
+        return self.total_prob / len(self.items) if self.items else 0
+
+
+class HPSInterpreter:
+    """HPS 解释器核心"""
+
     def __init__(self):
-        self.pools = {}      # 池子
-        self.vars = {}       # 变量
-        self.output = []     # 输出
-        self.stats = {
-            'draws': 0,
-            'success': 0,
-            'start_time': None,
-            'lines': 0
-        }
-        self.last_record = {}  # 上次循环记录结果
-    
-    # ==================== 概率解析 ====================
-    
-    def parse_prob(self, prob_str):
-        """解析概率（支持科学计数法）"""
-        prob_str = prob_str.strip()
-        
-        # 科学计数法: 1.7/-97
-        if '/-' in prob_str:
-            parts = prob_str.split('/-')
-            return float(parts[0]) * (10 ** -int(parts[1]))
-        
-        # 科学计数法: 1.7/+80
-        if '/+' in prob_str:
-            parts = prob_str.split('/+')
-            return float(parts[0]) * (10 ** int(parts[1]))
-        
-        # 普通百分比: 0.6/
-        if prob_str.endswith('/'):
-            return float(prob_str[:-1])
-        
-        return float(prob_str)
-    
-    # ==================== 变量处理 ====================
-    
-    def get_var(self, name):
-        """获取变量值"""
-        if name.startswith('#'):
-            name = name[1:]
-        return self.vars.get(name, 0)
-    
-    def set_var(self, name, value):
-        """设置变量值"""
-        if name.startswith('#'):
-            name = name[1:]
-        self.vars[name] = value
-        return value
-    
-    def format_text(self, text):
-        """格式化文本（替换变量）"""
-        def replace_var(match):
-            var_name = match.group(1)
-            val = self.vars.get(var_name, match.group(0))
-            if isinstance(val, float):
-                if abs(val) < 0.001 or abs(val) > 1e6:
-                    return f"{val:.2e}"
-                return f"{val:.4f}".rstrip('0').rstrip('.')
-            return str(val)
-        
-        return re.sub(r'#(\w+)', replace_var, text)
-    
-    # ==================== 主执行 ====================
-    
-    def run(self, code):
-        """运行HSP代码"""
-        self.output = []
-        self.stats['start_time'] = time.time()
-        self.stats['lines'] = 0
-        
-        lines = code.strip().split('\n')
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            i += 1
-            
-            if not line or line.startswith('¢'):
-                continue
-            
-            self.stats['lines'] += 1
-            try:
-                self.execute_line(line)
-            except Exception as e:
-                self.print(f"❌ 错误: {e}")
-        
-        return self.output
-    
-    def execute_line(self, line):
-        """执行单行"""
-        # 输出指令
-        if line.startswith('¢,'):
-            text = self.format_text(line[2:].strip())
-            self.print(text)
-        
-        # 池子定义
-        elif ')#' in line and ':/' in line:
-            self.define_pool(line)
-        
-        # 目标声明
-        elif line.startswith('<') and '*,' in line:
-            self.execute_goal(line)
-        
-        # 变量赋值
-        elif line.startswith('#') and '=' in line:
-            self.assign_var(line)
-        
-        # 数学运算
-        elif line.startswith('&A('):
-            result = self.eval_math(line)
-            self.print(f"= {self.format_value(result)}")
-        
-        # 循环记录
-        elif line.startswith('#¢{') and '}±' in line:
-            self.loop_record(line)
-        
-        # 显示统计
-        elif line == '#stats':
-            self.show_stats()
-        
-        # 清空变量
-        elif line == '#clear':
-            self.vars.clear()
-            self.print("🧹 变量已清空")
-        
-        # 条件判断
-        elif line.startswith('?') and '⇒' in line:
-            self.execute_condition(line)
-        
-        else:
-            self.print(f"⏳ {line}")
-    
-    # ==================== 池子操作 ====================
-    
-    def define_pool(self, line):
-        """定义池子"""
-        # 移除空格
-        line = re.sub(r'\s+', '', line)
-        match = re.match(r'\((.+?):/(.+?)\)#(.+)', line)
-        
-        if match:
-            prob_str, items_str, name = match.groups()
-            item_list = [i.strip() for i in items_str.split(',')]
-            
-            prob = self.parse_prob(prob_str)
-            per_item = prob / len(item_list)
-            
-            self.pools[name] = {
-                'prob': prob,
-                'items': item_list,
-                'per_item': per_item
-            }
-            self.print(f"📦 池子 '{name}' ({len(item_list)}件, {prob}%)")
-        else:
-            self.print(f"⚠️ 池子格式错误: {line}")
-    
-    # ==================== 目标声明 ====================
-    
-    def execute_goal(self, line):
-        """执行目标声明"""
-        # 移除空格
-        line = re.sub(r'\s+', '', line)
-        match = re.search(r'<\$(.+?),#(.+?)[×*](\d+),\*(\d+)>', line)
-        
-        if match:
-            item, pool_name, draw_type, guarantee = match.groups()
-            
-            if pool_name not in self.pools:
-                self.print(f"❌ 池子 '{pool_name}' 不存在")
-                return
-            
-            pool = self.pools[pool_name]
-            draw_times = int(draw_type)
-            guarantee_num = int(guarantee)
-            
-            self.print(f"🎯 目标: {item} {guarantee_num}抽保底 ({draw_times}连)")
-            
-            # 模拟抽卡
-            draws = 0
-            for i in range(1, guarantee_num + 1, draw_times):
-                draws = min(i + draw_times - 1, guarantee_num)
-                
-                if random.random() * 100 < pool['per_item']:
-                    self.print(f"✨ 第{draws}抽抽到 {item}！")
-                    self.stats['success'] += 1
-                    self.stats['draws'] += draws
-                    # 设置变量表示抽到了
-                    self.set_var(f"${item}", 1)
-                    return
-                
-                if draws % 10 == 0:
-                    self.print(f"⏳ 已抽{draws}抽...")
-            
-            self.print(f"🎯 保底: 第{guarantee_num}抽获得 {item}")
-            self.stats['draws'] += guarantee_num
-            self.set_var(f"${item}", 1)
-        else:
-            self.print(f"⚠️ 目标格式错误: {line}")
-    
-    # ==================== 变量赋值 ====================
-    
-    def assign_var(self, line):
-        """变量赋值"""
-        match = re.match(r'#(.+?)\s*=\s*(.+)', line)
-        if match:
-            name, value_str = match.groups()
-            
-            # 处理特殊变量 #¢.rate
-            if value_str == '#¢.rate' and 'last_record' in self.__dict__:
-                value = self.last_record.get('rate', 0)
-            else:
-                # 解析值
-                if value_str.startswith('&A('):
-                    value = self.eval_math(value_str)
-                elif value_str.startswith('"') and value_str.endswith('"'):
-                    value = value_str[1:-1]
-                else:
-                    try:
-                        value = float(value_str)
-                    except:
-                        value = value_str
-            
-            self.set_var(name, value)
-            self.print(f"📊 #{name} = {self.format_value(value)}")
-    
-    # ==================== 数学运算 ====================
-    
-    def eval_math(self, expr):
-        """计算数学表达式"""
-        expr = expr[3:-1]  # 去掉 &A( 和 )
-        
-        # 替换符号
-        expr = expr.replace('×', '*').replace('÷', '/').replace('^', '**')
-        expr = expr.replace('π', str(math.pi)).replace('e', str(math.e))
-        
-        # 替换变量
-        def replace_var(match):
-            var_name = match.group(1)
-            return str(self.vars.get(var_name, 0))
-        expr = re.sub(r'#(\w+)', replace_var, expr)
-        
-        # 数学函数
-        expr = expr.replace('㏒', 'math.log10')
-        expr = expr.replace('㏑', 'math.log')
-        expr = expr.replace('√', 'math.sqrt')
-        expr = expr.replace('abs', 'math.fabs')
-        
+        self.variables: Dict[str, Any] = {}
+        self.pools: Dict[str, Pool] = {}
+        self.currency: Dict[str, float] = {}
+        self.inventory: List[str] = []
+        self.pity_counter: int = 0
+        self.total_spent: float = 0
+        self.output_lines: List[str] = []
+
+    def reset(self):
+        """重置所有状态"""
+        self.__init__()
+
+    def execute(self, line: str, show_prompt: bool = False) -> List[str]:
+        """执行单行代码"""
+        self.output_lines = []
+        line = line.strip()
+
+        if not line:
+            return []
+
+        if show_prompt:
+            print(f"hps> {line}")
+
         try:
-            # 安全求值
-            result = eval(expr, {"__builtins__": {}, "math": math})
-            return float(result)
+            self._execute_line(line)
         except Exception as e:
-            self.print(f"⚠️ 数学计算错误: {e}")
+            self.output_lines.append(f"[!] {str(e)}")
+
+        return self.output_lines
+
+    def run_script(self, code: str, verbose: bool = True) -> None:
+        """批量执行脚本"""
+        lines = code.strip().split('\n')
+
+        for line_num, line in enumerate(lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+
+            outputs = self.execute(line, show_prompt=False)
+
+            if verbose:
+                for out in outputs:
+                    print(out)
+
+    def _execute_line(self, line: str):
+        """执行单行"""
+        # 注释（不包括输出）
+        if line.startswith('¢') and not line.startswith('¢,'):
+            comment = line[1:].strip()
+            if comment:
+                self.output_lines.append(f"[注] {comment}")
+            return
+
+        # 池子定义
+        if line.startswith('('):
+            self._define_pool(line)
+            return
+
+        # 变量赋值
+        if line.startswith('#') and '=' in line and not line.startswith('#¢'):
+            self._assign_variable(line)
+            return
+
+        # 目标声明
+        if line.startswith('<'):
+            self._execute_target(line)
+            return
+
+        # 输出（修复版）
+        if line.startswith('¢,'):
+            self._handle_output(line)
+            return
+
+        # 条件
+        if line.startswith('?'):
+            self._handle_condition(line)
+            return
+
+        # 特殊命令：/reset
+        if line == '/reset':
+            self.reset()
+            self.output_lines.append("[✓] 已重置所有数据")
+            return
+
+        # 特殊命令：/state
+        if line == '/state':
+            self.output_lines.append(self.get_state())
+            return
+
+        # 循环/函数等（待实现）
+        if any(line.startswith(kw) for kw in ['while', 'for', 'until', '¢.']):
+            self.output_lines.append(f"[待实现] {line[:30]}...")
+            return
+
+        # 记录循环
+        if line.startswith('#¢'):
+            self._handle_record(line)
+            return
+
+        # 退出
+        if line in ['exit', 'quit', '退出']:
+            self.output_lines.append("[bye]")
+            return
+
+        self.output_lines.append(f"[?] 未知语法: {line[:40]}")
+
+    def _define_pool(self, line: str):
+        """定义池子"""
+        prob_match = re.search(r'\(([\d.]+)/', line)
+        if not prob_match:
+            raise ValueError("池子格式: (概率/:物品)#名字")
+
+        total_prob = float(prob_match.group(1)) / 100
+        items = re.findall(r'\$(\w+)', line)
+
+        if not items:
+            raise ValueError("池子需要至少一个物品 $名字")
+
+        name_match = re.search(r'#(\w+)', line)
+        if not name_match:
+            raise ValueError("池子需要命名 #名字")
+
+        pool_name = name_match.group(1)
+        self.pools[pool_name] = Pool(pool_name, total_prob, items)
+
+        self.output_lines.append(
+            f"[池] #{pool_name} | {total_prob*100}% | {len(items)}个物品"
+        )
+
+    def _assign_variable(self, line: str):
+        """变量赋值"""
+        match = re.match(r'#(\w+)\s*=\s*(.+)', line)
+        if not match:
+            raise ValueError("赋值格式: #变量 = 值")
+
+        name, value_str = match.groups()
+        value_str = value_str.strip()
+
+        if value_str.startswith('¥'):
+            self.currency[name] = float(value_str[1:])
+        elif '/' in value_str:
+            prob_match = re.search(r'([\d.]+)/', value_str)
+            if prob_match:
+                self.variables[name] = float(prob_match.group(1)) / 100
+        else:
+            try:
+                # 尝试数学表达式
+                if any(op in value_str for op in ['+', '-', '×', '÷', '*', '/']):
+                    result = self._eval_math(value_str)
+                    self.variables[name] = result
+                else:
+                    self.variables[name] = float(value_str)
+            except:
+                self.variables[name] = value_str
+
+        self.output_lines.append(f"[变] #{name} = {value_str}")
+
+    def _eval_math(self, expr: str) -> float:
+        """简单数学表达式求值"""
+        # 替换变量
+        for var, val in self.variables.items():
+            expr = expr.replace(f'#{var}', str(val))
+        for var, val in self.currency.items():
+            expr = expr.replace(f'#{var}', str(val))
+
+        # 替换运算符
+        expr = expr.replace('×', '*').replace('÷', '/')
+
+        # 安全求值
+        try:
+            return eval(expr, {"__builtins__": {}}, {
+                "random": random, "math": math,
+                "π": math.pi, "e": math.e
+            })
+        except:
             return 0
-    
-    # ==================== 循环记录 ====================
-    
-    def loop_record(self, line):
-        """循环记录 #¢{操作}± (次数)"""
-        match = re.match(r'#¢\{(.+?)\}±\s*\((\d+)\)', line)
-        if match:
-            operation, times = match.groups()
-            times = int(times)
-            
-            self.print(f"🔄 循环 {times} 次")
-            
+
+    def _execute_target(self, line: str):
+        """执行目标声明"""
+        item_match = re.search(r'\$(\w+)', line)
+        if not item_match:
+            raise ValueError("目标格式: <$物品,#池子,*保底>")
+        target_item = item_match.group(1)
+
+        pool_match = re.search(r'#(\w+)', line)
+        if not pool_match or pool_match.group(1) not in self.pools:
+            raise ValueError(f"池子未定义")
+        pool_name = pool_match.group(1)
+        pool = self.pools[pool_name]
+
+        pity_match = re.search(r'\*(\d+)', line)
+        max_pity = int(pity_match.group(1)) if pity_match else 90
+
+        self.output_lines.append(f"[抽] 目标: ${target_item} | 保底: {max_pity}")
+
+        # 抽卡模拟
+        for draw in range(1, max_pity + 1):
+            self.pity_counter += 1
+            current_prob = pool.total_prob
+
+            if self.pity_counter > 70:
+                current_prob = min(1.0, current_prob + (self.pity_counter - 70) * 0.02)
+
+            if random.random() < current_prob:
+                drawn = random.choice(pool.items)
+                self.inventory.append(drawn)
+
+                if draw <= 3 or drawn == target_item or draw >= max_pity - 2:
+                    pity_tag = f" [{self.pity_counter}]" if self.pity_counter > 70 else ""
+                    self.output_lines.append(f"     第{draw}抽: ${drawn}{pity_tag}")
+
+                if drawn == target_item:
+                    cost = draw * 160
+                    self.total_spent += cost
+                    self.output_lines.append(f"[✓] 出货! ${target_item} | {draw}抽 ¥{cost}")
+                    self.pity_counter = 0
+                    return
+                break
+        else:
+            self.inventory.append(target_item)
+            cost = max_pity * 160
+            self.total_spent += cost
+            self.output_lines.append(f"[!] 保底触发 | ${target_item} | ¥{cost}")
+            self.pity_counter = 0
+
+    def _handle_output(self, line: str):
+        """处理输出（修复变量替换）"""
+        content = line[2:]
+
+        # 替换变量 #变量名
+        def replace_var(match):
+            var_name = match.group(1)
+            if var_name in self.variables:
+                val = self.variables[var_name]
+                if isinstance(val, float):
+                    if val < 1:  # 概率
+                        return f"{val*100}%"
+                    return f"{val:.2f}"
+                return str(val)
+            elif var_name in self.currency:
+                return f"¥{self.currency[var_name]}"
+            return f"[未定义:#{var_name}]"
+
+        content = re.sub(r'#(\w+)', replace_var, content)
+
+        # 替换特殊变量
+        content = content.replace('{inventory}', str(self.inventory))
+        content = content.replace('{total_spent}', f'¥{self.total_spent}')
+        content = content.replace('{pity}', str(self.pity_counter))
+
+        # 计算简单表达式 {64800 - total_spent}
+        def calc_expr(match):
+            expr = match.group(1)
+            try:
+                # 替换 total_spent
+                expr = expr.replace('total_spent', str(self.total_spent))
+                expr = expr.replace('inventory.length', str(len(self.inventory)))
+                # 安全计算
+                result = eval(expr, {"__builtins__": {}}, {})
+                return f"¥{result:.0f}" if result > 100 else str(result)
+            except:
+                return match.group(0)
+
+        content = re.sub(r'\{(\d+\s*[-+]\s*[^}]+)\}', calc_expr, content)
+
+        self.output_lines.append(f"[出] {content}")
+
+    def _handle_condition(self, line: str):
+        """条件处理（简化）"""
+        self.output_lines.append(f"[条] {line}")
+
+    def _handle_record(self, line: str):
+        """记录循环（简化）"""
+        times_match = re.search(r'±\s*\((\d+)\)', line)
+        if times_match:
+            times = int(times_match.group(1))
+            # 模拟实验
             success = 0
-            for i in range(times):
-                # 简单模拟成功率 50% 左右
+            for _ in range(times):
                 if random.random() < 0.5:
                     success += 1
-                
-                if (i + 1) % max(1, times // 10) == 0:
-                    progress = (i + 1) / times * 100
-                    self.print(f"⏳ {progress:.0f}% ({i+1}/{times})")
-            
             rate = success / times * 100
-            self.print(f"📊 成功率: {rate:.1f}% ({success}/{times})")
-            
-            # 存储结果
-            self.last_record = {
+
+            self.variables['¢'] = {
                 'success': success,
+                'failure': times - success,
                 'total': times,
                 'rate': rate
             }
-            
-            # 设置变量 #¢.success #¢.total #¢.rate
-            self.set_var('¢.success', success)
-            self.set_var('¢.total', times)
-            self.set_var('¢.rate', rate)
-    
-    # ==================== 条件判断 ====================
-    
-    def execute_condition(self, line):
-        """执行条件判断 ?(条件) ⇒ 动作"""
-        match = re.match(r'\?\((.+?)\)\s*⇒\s*(.+)', line)
-        if match:
-            condition, action = match.groups()
-            
-            # 评估条件
-            result = self.eval_condition(condition)
-            
-            if result:
-                self.print(f"✅ 条件成立，执行: {action}")
-                self.execute_line(action)
-            else:
-                self.print(f"⏭️ 条件不成立")
-    
-    def eval_condition(self, cond):
-        """评估条件表达式"""
-        # 处理 #变量 > #变量 或 #变量 > 数字
-        ops = {
-            '>': lambda a, b: a > b,
-            '<': lambda a, b: a < b,
-            '>=': lambda a, b: a >= b,
-            '<=': lambda a, b: a <= b,
-            '==': lambda a, b: a == b,
-            '!=': lambda a, b: a != b
-        }
-        
-        for op in ops:
-            if op in cond:
-                parts = cond.split(op)
-                if len(parts) == 2:
-                    left = self.eval_value(parts[0].strip())
-                    right = self.eval_value(parts[1].strip())
-                    return ops[op](left, right)
-        
-        return False
-    
-    def eval_value(self, token):
-        """评估单个值（变量或数字）"""
-        token = token.strip()
-        if token.startswith('&A('):
-            return self.eval_math(token)
-        elif token.startswith('#'):
-            return self.vars.get(token[1:], 0)
+            self.output_lines.append(f"[录] 实验{times}次 | 成功:{success} 失败:{times-success} 率:{rate:.1f}%")
         else:
-            try:
-                return float(token)
-            except:
-                return token
-    
-    # ==================== 统计 ====================
-    
-    def show_stats(self):
-        """显示统计信息"""
-        duration = time.time() - self.stats['start_time']
-        print("\n" + "=" * 50)
-        print("📊 统计信息")
-        print("=" * 50)
-        print(f"运行时间: {duration:.2f}秒")
-        print(f"执行行数: {self.stats['lines']}")
-        print(f"总抽卡: {self.stats['draws']}")
-        if self.stats['draws'] > 0:
-            rate = self.stats['success'] / self.stats['draws'] * 100
-            print(f"成功率: {rate:.4f}%")
-        print(f"变量数: {len(self.vars)}")
-        print(f"池子数: {len(self.pools)}")
-        
-        if self.vars:
-            print("\n📋 变量列表:")
-            for name, val in list(self.vars.items())[:10]:
-                print(f"  #{name} = {self.format_value(val)}")
-        
-        print("=" * 50)
-    
-    # ==================== 工具 ====================
-    
-    def format_value(self, val):
-        """格式化值"""
-        if isinstance(val, float):
-            if abs(val) < 0.001 or abs(val) > 1e6:
-                return f"{val:.2e}"
-            return f"{val:.4f}".rstrip('0').rstrip('.')
-        return str(val)
-    
-    def print(self, text):
-        """输出"""
-        timestamp = time.strftime('%H:%M:%S')
-        print(f"[{timestamp}] {text}")
-        self.output.append(text)
+            self.output_lines.append("[录] 格式: #¢{...}±(次数)")
+
+    def get_state(self) -> str:
+        """获取当前状态"""
+        lines = ["─" * 40]
+        lines.append("📊 当前状态:")
+
+        if self.pools:
+            lines.append(f"  池子: {', '.join(self.pools.keys())}")
+        if self.variables:
+            vars_display = {}
+            for k, v in self.variables.items():
+                if isinstance(v, float) and v < 1:
+                    vars_display[k] = f"{v*100}%"
+                else:
+                    vars_display[k] = v
+            lines.append(f"  变量: {vars_display}")
+        if self.currency:
+            curr_display = {k: f"¥{v}" for k, v in self.currency.items()}
+            lines.append(f"  货币: {curr_display}")
+
+        lines.append(f"  库存: {self.inventory}")
+        lines.append(f"  保底: {self.pity_counter} | 总花费: ¥{self.total_spent}")
+        lines.append("─" * 40)
+        return "\n".join(lines)
 
 
-# ==================== 命令行 ====================
+class HPSREPL(cmd.Cmd):
+    """HPS 交互式解释器"""
 
-def main():
-    import sys
-    import os
-    
-    hsp = HSP()
-    
-    # 交互模式
-    if len(sys.argv) == 1 or '-i' in sys.argv:
-        print("=" * 50)
-        print("HSP 最终稳定版")
-        print("命令: #stats 统计, #clear 清空, exit 退出")
-        print("=" * 50)
-        
+    intro = """
+╔══════════════════════════════════════════╗
+║     HPS (HermesProbability Science)      ║
+║              交互模式 v0.2.2              ║
+╠══════════════════════════════════════════╣
+║  输入 HPS 代码直接执行                    ║
+║  特殊命令:                                ║
+║    /state  - 查看当前状态                ║
+║    /reset  - 重置所有数据                ║
+║    /run    - 运行脚本文件                ║
+║    /help   - 显示帮助                    ║
+║    exit    - 退出                        ║
+╚══════════════════════════════════════════╝
+    """
+
+    prompt = 'hps> '
+
+    def __init__(self):
+        super().__init__()
+        self.interpreter = HPSInterpreter()
+
+    def default(self, line: str):
+        """处理默认输入"""
+        if line.strip() in ['exit', 'quit']:
+            print("再见! 👋")
+            return True
+
+        outputs = self.interpreter.execute(line, show_prompt=True)
+        for out in outputs:
+            print(out)
+
+    def do_state(self, arg):
+        """/state - 显示当前状态"""
+        print(self.interpreter.get_state())
+
+    def do_reset(self, arg):
+        """/reset - 重置解释器"""
+        self.interpreter.reset()
+        print("[✓] 已重置所有数据")
+
+    def do_run(self, filepath: str):
+        """/run <文件> - 运行 HPS 脚本"""
+        if not filepath.strip():
+            print("[!] 用法: /run 文件名.hps")
+            return
+
+        try:
+            with open(filepath.strip(), 'r', encoding='utf-8') as f:
+                code = f.read()
+
+            print(f"\n[运行] {filepath}")
+            print("=" * 50)
+
+            self.interpreter.run_script(code, verbose=True)
+
+            print("=" * 50)
+            print("[✓] 脚本执行完成\n")
+
+        except FileNotFoundError:
+            print(f"[!] 文件不存在: {filepath}")
+        except Exception as e:
+            print(f"[!] 错误: {e}")
+
+    def do_help(self, arg):
+        """/help - 显示帮助"""
+        help_text = """
+📘 HPS 语法速查:
+═══════════════
+定义池子:  (概率/:物品列表)#池子名
+           例: (0.6/:$雷电,$甘雨)#UP
+
+变量赋值:  #变量 = 值
+           例: #预算 = ¥64800
+           例: #计算 = 64800 ÷ 160
+
+目标抽卡:  <$目标,#池子×:次数,*保底>
+           例: <$雷电,#UP×:10,*90>
+
+输出:      ¢,内容
+           例: ¢,花费: {total_spent}
+           例: ¢,结果: #变量
+
+特殊命令:
+  /state    查看当前所有状态
+  /reset    清空数据重新开始
+  /run 文件  运行 .hps 脚本
+  exit      退出交互模式
+"""
+        print(help_text)
+
+    def do_exit(self, arg):
+        """exit - 退出"""
+        print("再见! 👋")
+        return True
+
+    def emptyline(self):
+        pass
+
+    def cmdloop(self, intro=None):
+        print(self.intro)
         while True:
             try:
-                line = input("\nHSP> ").strip()
-                if line.lower() in ('exit', 'quit'):
-                    break
-                if not line:
-                    continue
-                hsp.execute_line(line)
-            except KeyboardInterrupt:
-                print("\n退出")
+                line = input(self.prompt)
+                self.default(line)
+            except EOFError:
+                print()
                 break
-    
-    # 执行代码
-    elif '-e' in sys.argv:
-        idx = sys.argv.index('-e')
-        if idx + 1 < len(sys.argv):
-            code = sys.argv[idx + 1]
-            hsp.run(code)
-    
-    # 执行文件
-    elif len(sys.argv) == 2 and sys.argv[1] != '--help':
-        filename = sys.argv[1]
-        if os.path.exists(filename):
-            with open(filename, 'r', encoding='utf-8') as f:
-                hsp.run(f.read())
-        else:
-            print(f"文件不存在: {filename}")
-    
+            except KeyboardInterrupt:
+                print()
+                print("输入 exit 退出")
+
+
+def main():
+    """主函数"""
+    parser = argparse.ArgumentParser(
+        description='HPS 解释器 - 让概率变得可计算',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+示例:
+  python hps_repl.py                    # 启动交互模式
+  python hps_repl.py script.hps         # 运行脚本
+  python hps_repl.py script.hps -i      # 运行脚本后进入交互模式
+        """
+    )
+    parser.add_argument('file', nargs='?', help='HPS 脚本文件 (.hps)')
+    parser.add_argument('-i', '--interactive', action='store_true', 
+                       help='运行脚本后进入交互模式')
+
+    args = parser.parse_args()
+
+    if args.file:
+        interp = HPSInterpreter()
+
+        try:
+            with open(args.file, 'r', encoding='utf-8') as f:
+                code = f.read()
+
+            print(f"[HPS] 运行脚本: {args.file}\n")
+            interp.run_script(code, verbose=True)
+
+            if args.interactive:
+                print()
+                repl = HPSREPL()
+                repl.interpreter = interp
+                repl.cmdloop()
+
+        except FileNotFoundError:
+            print(f"[!] 找不到文件: {args.file}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"[!] 错误: {e}")
+            sys.exit(1)
     else:
-        print("用法:")
-        print("  python hsp.py 文件.hps")
-        print("  python hsp.py -e '代码'")
-        print("  python hsp.py -i")
+        repl = HPSREPL()
+        repl.cmdloop()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
